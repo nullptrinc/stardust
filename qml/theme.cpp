@@ -28,8 +28,12 @@ SdTheme::SdTheme() {
 void SdTheme::update() {
 	QString accent = appearance_->values().value(QStringLiteral("accent")).toString();
 	accent = valid_color(accent) ? accent.toLower() : QString::fromLatin1(default_accent);
-	if (accent != accent_) {
+	QString style = appearance_->values().value(QStringLiteral("icons")).toString();
+	static const QStringList styles = { "default", "dark", "tinted", "clear" };
+	style = styles.contains(style) ? style : QStringLiteral("default");
+	if (accent != accent_ || style != icon_style_) {
 		accent_ = accent;
+		icon_style_ = style;
 		emit changed();
 	}
 }
@@ -61,6 +65,15 @@ bool SdTheme::setAccent(const QString &color) {
 		return false;
 	}
 	return appearance_->publish({{QStringLiteral("accent"), color.toLower()}});
+}
+
+bool SdTheme::setIconStyle(const QString &style) {
+	static const QStringList styles = { "default", "dark", "tinted", "clear" };
+	if (!styles.contains(style)) {
+		qWarning("Theme.setIconStyle: %s is not default, dark, tinted or clear", qPrintable(style));
+		return false;
+	}
+	return appearance_->publish({{QStringLiteral("icons"), style}});
 }
 
 void registerThemeTypes() {
