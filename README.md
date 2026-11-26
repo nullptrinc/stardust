@@ -78,7 +78,7 @@ Container {
 |---|---|
 | `focused` | follows the focus; `forceFocus()` moves it here |
 | `onActivated` | OK (or Enter) on the focused container; a tap and OK stand in for each other when only `onClicked` or `onActivated` is handled |
-| `onBack` | Back or Escape, on the focused container or its nearest ancestor that handles it; with no handler the app quits and the shell comes back |
+| `onBack` | Back or Escape, on the focused container or its nearest ancestor that handles it; with no handler, on a TV (`STARRY_MODE=tv`), the app quits and the shell comes back |
 | `onKeyPressed(key)`, `onKeyReleased(key)` | any other key by name (`"playpause"`, `"volumeup"`, `"info"`, `"0"`…), and an arrow with nowhere to go |
 | `scroll` | `"horizontal"` or `"vertical"`: moves the content to show the focused descendant within the padding |
 

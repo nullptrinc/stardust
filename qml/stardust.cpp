@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <linux/input-event-codes.h>
 #include "stardust.h"
+#include "theme.h"
 
 using stardust::Mutation;
 using stardust::Prop;
@@ -428,8 +429,13 @@ void SdApp::drainEvents() {
 				n = n->parentNode();
 			}
 			if (!n) {
-				QCoreApplication::quit(); /* nothing to go back to: the shell takes over */
-				return;
+				/* Nothing to go back to: on a TV the app closes and the shell
+				 * takes over; a phone has its home gesture instead. */
+				if (SdTheme::instance()->tv()) {
+					QCoreApplication::quit();
+					return;
+				}
+				break;
 			}
 			emit n->back();
 			break;

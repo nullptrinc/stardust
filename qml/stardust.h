@@ -9,7 +9,7 @@
  * pressed direction, and animates the lift itself. `focused` follows it;
  * OK emits `activated` (or `clicked`, when only that is handled); Back emits
  * `back` on the focused node or its nearest ancestor that handles it, and
- * quits the app when nobody does. Other keys bubble the same way as
+ * on a TV (STARRY_MODE=tv) quits the app when nobody does. Other keys bubble the same way as
  * `keyPressed(name)` and `keyReleased(name)`.
  */
 #pragma once
