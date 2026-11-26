@@ -63,5 +63,11 @@ int main(int argc, char *argv[]) {
 		});
 		signal(SIGUSR1, on_tap_signal);
 	}
-	return app.exec();
+	int status = app.exec();
+	/* The window is closed: go now. Should the render thread hang in the
+	 * driver on the way out, SIGALRM ends the process instead, so the shell
+	 * never sees a process without a window. */
+	alarm(3);
+	SdApp::instance()->stop();
+	return status;
 }

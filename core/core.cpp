@@ -61,6 +61,10 @@ struct Core::State {
 
 	int width = 360, height = 640, scale = 1;
 	bool configured = false, resized = false, dirty = true;
+	/* The next frame waits for this, in our own loop rather than inside
+	 * eglSwapBuffers: a hidden window gets no frame callbacks, and a swap
+	 * blocked on one would never see xdg_toplevel.close or the keys. */
+	wl_callback *frame_callback = nullptr;
 
 	/* STARDUST_TRACE: per-animation frame statistics on stderr. */
 	bool trace = getenv("STARDUST_TRACE") != nullptr;
@@ -130,6 +134,12 @@ static void toplevel_close(void *data, xdg_toplevel *) {
 }
 static void toplevel_bounds(void *, xdg_toplevel *, int32_t, int32_t) {}
 static void toplevel_capabilities(void *, xdg_toplevel *, wl_array *) {}
+static void frame_done(void *data, wl_callback *callback, uint32_t) {
+	wl_callback_destroy(callback);
+	static_cast<Core::State *>(data)->frame_callback = nullptr;
+}
+static const wl_callback_listener frame_listener = {frame_done};
+
 static const xdg_toplevel_listener toplevel_listener = {
 	toplevel_configure, toplevel_close, toplevel_bounds, toplevel_capabilities,
 };
@@ -318,7 +328,9 @@ bool Core::State::create_gl() {
 			!eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context)) {
 		return false;
 	}
-	eglSwapInterval(egl_display, 1); // swaps follow the compositor's frame callbacks
+	// The loop paces itself on frame callbacks (see frame_callback), so a
+	// swap never blocks waiting for one.
+	eglSwapInterval(egl_display, 0);
 	return renderer.init(options.regular_font.c_str(), options.bold_font.c_str());
 }
 
@@ -520,7 +532,9 @@ bool Core::State::frame() {
 			capture_path = nullptr;
 		}
 	}
-	eglSwapBuffers(egl_display, egl_surface);
+	frame_callback = wl_surface_frame(surface);
+	wl_callback_add_listener(frame_callback, &frame_listener, this);
+	eglSwapBuffers(egl_display, egl_surface); // commits the callback with the frame
 	if (trace) {
 		double now = now_seconds();
 		if (tracing) {
@@ -557,9 +571,10 @@ void Core::State::run() {
 				"longest gap %.1f ms\n", length, trace_frames,
 				trace_frames ? length * 1000 / trace_frames : 0.0, trace_max_gap * 1000);
 		}
-		if ((dirty || animating) && configured) {
-			// Blocks until the compositor wants the next frame. A focus that
-			// settled during layout starts its animation in the next one.
+		bool ready = configured && !frame_callback; // the compositor wants a frame
+		if ((dirty || animating) && ready) {
+			// A focus that settled during layout starts its animation in
+			// the next frame.
 			dirty = frame();
 		}
 		if (!running) break;
@@ -569,7 +584,8 @@ void Core::State::run() {
 		}
 		wl_display_flush(display);
 		pollfd fds[2] = {{wl_display_get_fd(display), POLLIN, 0}, {wake_fd, POLLIN, 0}};
-		int timeout = animating || dirty ? 0 : -1;
+		// Waiting for a frame callback is waiting for Wayland events.
+		int timeout = (animating || dirty) && configured && !frame_callback ? 0 : -1;
 		if (repeat_key) {
 			int wait = std::max(0, int((repeat_next - now_seconds()) * 1000));
 			timeout = timeout < 0 ? wait : std::min(timeout, wait);
@@ -618,6 +634,9 @@ void Core::State::teardown() {
 		wl_egl_window_destroy(egl_window);
 	}
 	if (display) {
+		if (frame_callback) {
+			wl_callback_destroy(frame_callback);
+		}
 		wl_display_disconnect(display);
 	}
 	if (wake_fd >= 0) {
