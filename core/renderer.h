@@ -25,10 +25,13 @@ struct Material {
 	float glow = 0, inner_glow = 0; // light around and inside the edge
 	Color glow_color;
 	Surface surface = Surface::Plain;
+	float highlight = 0; // a soft sheen of a focused surface, 0..1
+	float highlight_x = 0, highlight_y = 0; // its centre, in half-sizes from the middle
 
 	bool plain() const {
 		return gloss == 0 && border == 0 && bevel == 0 && inner_shadow == 0 && shadow == 0 &&
-			glow == 0 && inner_glow == 0 && surface == Surface::Plain && bottom.a <= 0;
+			glow == 0 && inner_glow == 0 && surface == Surface::Plain && bottom.a <= 0 &&
+			highlight <= 0;
 	}
 };
 
@@ -88,7 +91,7 @@ private:
 	struct {
 		GLint screen, half, radius, top, bottom, border_color, shadow_color, glow_color;
 		GLint border, gloss, bevel, inner_shadow, shadow, glow, inner_glow, surface, light,
-			scale, alpha;
+			scale, alpha, highlight, highlight_at;
 	} material_;
 	float light_ = 3.5f;
 	Atlas atlas_, glow_atlas_;

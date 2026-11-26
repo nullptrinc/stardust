@@ -2,7 +2,15 @@
 /*
  * Stardust QML types. They are thin QObjects: every property change becomes
  * a mutation for the render core, which does the layout, animation and
- * drawing on its own thread. Touches come back as signals.
+ * drawing on its own thread. Touches and keys come back as signals.
+ *
+ * Focus (remote controls, keyboards): the render core moves the focus
+ * between `focusable` containers with the arrow keys, nearest first in the
+ * pressed direction, and animates the lift itself. `focused` follows it;
+ * OK emits `activated` (or `clicked`, when only that is handled); Back emits
+ * `back` on the focused node or its nearest ancestor that handles it, and
+ * quits the app when nobody does. Other keys bubble the same way as
+ * `keyPressed(name)` and `keyReleased(name)`.
  */
 #pragma once
 
@@ -55,6 +63,15 @@ class SdNode : public QObject, public QQmlParserStatus {
 	Q_PROPERTY(qreal innerGlow MEMBER inner_glow_ NOTIFY innerGlowChanged)
 	Q_PROPERTY(QString glowColor MEMBER glow_color_ NOTIFY glowColorChanged)
 	Q_PROPERTY(QString material MEMBER material_ NOTIFY materialChanged)
+	/* Focus: the lift while focused, and "horizontal"/"vertical" scroll
+	 * containers that keep the focused descendant in view. */
+	Q_PROPERTY(bool focusable MEMBER focusable_ NOTIFY focusableChanged)
+	Q_PROPERTY(bool focused READ focused NOTIFY focusedChanged)
+	Q_PROPERTY(qreal focusScale MEMBER focus_scale_ NOTIFY focusScaleChanged)
+	Q_PROPERTY(qreal focusShadow MEMBER focus_shadow_ NOTIFY focusShadowChanged)
+	Q_PROPERTY(qreal focusHighlight MEMBER focus_highlight_ NOTIFY focusHighlightChanged)
+	Q_PROPERTY(qreal focusTilt MEMBER focus_tilt_ NOTIFY focusTiltChanged)
+	Q_PROPERTY(QString scroll MEMBER scroll_ NOTIFY scrollChanged)
 
 public:
 	explicit SdNode(QObject *parent = nullptr);
@@ -65,8 +82,16 @@ public:
 	SdNode *parentNode() const { return parent_node_; }
 	bool pressed() const { return pressed_; }
 	void setPressed(bool pressed);
-	/* Whether QML code handles onClicked on this node. */
+	bool focused() const { return focused_; }
+	void setFocused(bool focused);
+	/* Whether QML code handles these signals on this node. */
 	bool handlesClicked() const;
+	bool handlesActivated() const;
+	bool handlesBack() const;
+	bool handlesKeys() const;
+	/* Moves the focus here (once the node is shown, if it is not yet). */
+	Q_INVOKABLE void forceFocus();
+	bool wantsFocus() const { return wants_focus_; }
 
 	stardust::NodeId id = 0;
 
@@ -104,6 +129,17 @@ signals:
 	void innerGlowChanged();
 	void glowColorChanged();
 	void materialChanged();
+	void focusableChanged();
+	void focusedChanged();
+	void focusScaleChanged();
+	void focusShadowChanged();
+	void focusHighlightChanged();
+	void focusTiltChanged();
+	void scrollChanged();
+	void activated();
+	void back();
+	void keyPressed(const QString &key);
+	void keyReleased(const QString &key);
 
 private slots:
 	void propertyChanged();
@@ -126,6 +162,9 @@ private:
 	QString material_ = QStringLiteral("plain");
 	qreal gloss_ = 0, border_width_ = 0, bevel_ = 0, inner_shadow_ = 0, shadow_ = 0;
 	qreal glow_ = 0, inner_glow_ = 0;
+	bool focusable_ = false, focused_ = false, wants_focus_ = false;
+	qreal focus_scale_ = 1.1, focus_shadow_ = 24, focus_highlight_ = 0.5, focus_tilt_ = 6;
+	QString scroll_ = QStringLiteral("none");
 	QList<SdNode *> children_;
 	SdNode *parent_node_ = nullptr;
 };
@@ -244,6 +283,7 @@ private slots:
 private:
 	void create(SdNode *node, stardust::NodeId parent);
 
+	SdWindow *window_ = nullptr;
 	stardust::Bridge bridge_;
 	std::unique_ptr<stardust::Core> core_;
 	std::vector<stardust::Mutation> batch_;

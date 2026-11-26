@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <EGL/egl.h>
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <future>
 #include <fcntl.h>
+#include <linux/input-event-codes.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -26,6 +28,7 @@ namespace {
 
 constexpr int max_touch = 10;
 constexpr float tap_slop = 12;
+constexpr int max_focus_repeat = 10; // focus moves per second while an arrow is held
 
 double now_seconds() {
 	using clock = std::chrono::steady_clock;
@@ -46,6 +49,7 @@ struct Core::State {
 	xdg_wm_base *wm_base = nullptr;
 	wl_seat *seat = nullptr;
 	wl_touch *touch = nullptr;
+	wl_keyboard *keyboard = nullptr;
 	wl_output *output = nullptr;
 	wl_surface *surface = nullptr;
 	xdg_surface *window = nullptr;
@@ -75,6 +79,12 @@ struct Core::State {
 		float start_x = 0, start_y = 0, x = 0, y = 0;
 	} touches[max_touch];
 
+	/* Keys: arrows move the focus and repeat while held; OK activates. */
+	uint32_t repeat_key = 0;
+	double repeat_next = 0;
+	int repeat_rate = 25, repeat_delay = 400; // the compositor's, from repeat_info
+	NodeId ok_node = 0; // focused when OK went down
+
 	State(Bridge &bridge, CoreOptions options) : bridge(bridge), options(std::move(options)) {}
 	~State() { if (interrupt_fd >= 0) close(interrupt_fd); }
 
@@ -82,8 +92,13 @@ struct Core::State {
 	bool create_gl();
 	void run();
 	void draw(NodeId id, float alpha, float k, float tx, float ty);
-	void frame();
+	bool frame(); // true when the focus moved and wants another frame
 	void teardown();
+
+	void key(uint32_t code, bool down);
+	bool navigate(uint32_t code, double now);
+	/* Tells the application about a focus change since `before`. */
+	bool focus_events(NodeId before);
 };
 
 /* ---- Wayland listeners ---- */
@@ -181,11 +196,41 @@ static const wl_touch_listener touch_listener = {
 	touch_down, touch_up, touch_motion, touch_frame, touch_cancel,
 };
 
+/* Keys arrive as Linux evdev codes; no keymap is needed for navigation. */
+static void keyboard_keymap(void *, wl_keyboard *, uint32_t, int32_t fd, uint32_t) {
+	close(fd);
+}
+static void keyboard_enter(void *, wl_keyboard *, uint32_t, wl_surface *, wl_array *) {}
+static void keyboard_leave(void *data, wl_keyboard *, uint32_t, wl_surface *) {
+	auto *s = static_cast<Core::State *>(data);
+	s->repeat_key = 0;
+	s->ok_node = 0;
+}
+static void keyboard_key(void *data, wl_keyboard *, uint32_t, uint32_t, uint32_t key,
+		uint32_t state) {
+	static_cast<Core::State *>(data)->key(key, state == WL_KEYBOARD_KEY_STATE_PRESSED);
+}
+static void keyboard_modifiers(void *, wl_keyboard *, uint32_t, uint32_t, uint32_t, uint32_t,
+	uint32_t) {}
+static void keyboard_repeat_info(void *data, wl_keyboard *, int32_t rate, int32_t delay) {
+	auto *s = static_cast<Core::State *>(data);
+	s->repeat_rate = rate;
+	s->repeat_delay = delay;
+}
+static const wl_keyboard_listener keyboard_listener = {
+	keyboard_keymap, keyboard_enter, keyboard_leave, keyboard_key, keyboard_modifiers,
+	keyboard_repeat_info,
+};
+
 static void seat_capabilities(void *data, wl_seat *seat, uint32_t caps) {
 	auto *s = static_cast<Core::State *>(data);
 	if ((caps & WL_SEAT_CAPABILITY_TOUCH) && !s->touch) {
 		s->touch = wl_seat_get_touch(seat);
 		wl_touch_add_listener(s->touch, &touch_listener, s);
+	}
+	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !s->keyboard) {
+		s->keyboard = wl_seat_get_keyboard(seat);
+		wl_keyboard_add_listener(s->keyboard, &keyboard_listener, s);
 	}
 }
 static void seat_name(void *, wl_seat *, const char *) {}
@@ -277,6 +322,93 @@ bool Core::State::create_gl() {
 	return renderer.init(options.regular_font.c_str(), options.bold_font.c_str());
 }
 
+/* ---- keys and focus ---- */
+
+static bool arrow(uint32_t code, Direction &direction, float &dx, float &dy) {
+	switch (code) {
+	case KEY_LEFT: direction = Direction::Left; dx = -1; dy = 0; return true;
+	case KEY_RIGHT: direction = Direction::Right; dx = 1; dy = 0; return true;
+	case KEY_UP: direction = Direction::Up; dx = 0; dy = -1; return true;
+	case KEY_DOWN: direction = Direction::Down; dx = 0; dy = 1; return true;
+	}
+	return false;
+}
+
+bool Core::State::focus_events(NodeId before) {
+	NodeId after = tree.focused();
+	if (after == before) {
+		return false;
+	}
+	if (before) {
+		bridge.push_event({Event::Unfocused, before});
+	}
+	if (after) {
+		bridge.push_event({Event::Focused, after});
+	}
+	return true;
+}
+
+/* Moves the focus one step; an arrow with nowhere to go goes to the app. */
+bool Core::State::navigate(uint32_t code, double now) {
+	Direction direction;
+	float dx, dy;
+	arrow(code, direction, dx, dy);
+	NodeId before = tree.focused();
+	NodeId next = before ? tree.neighbour(direction) : 0;
+	if (!next) {
+		bridge.push_event({Event::Key, before, 0, 0, code, true});
+		return false;
+	}
+	tree.focus(next, dx, dy, now);
+	focus_events(before);
+	dirty = true;
+	return true;
+}
+
+void Core::State::key(uint32_t code, bool down) {
+	double now = now_seconds();
+	Direction direction;
+	float dx, dy;
+	if (arrow(code, direction, dx, dy)) {
+		if (down) {
+			repeat_key = navigate(code, now) && repeat_rate > 0 ? code : 0;
+			repeat_next = now + repeat_delay / 1000.0;
+		} else if (code == repeat_key) {
+			repeat_key = 0;
+		}
+		return;
+	}
+	if (down) {
+		repeat_key = 0;
+	}
+	NodeId focused = tree.focused();
+	switch (code) {
+	case KEY_OK:
+	case KEY_SELECT:
+	case KEY_ENTER:
+	case KEY_KPENTER:
+		/* Pressed and Released drive `pressed` as a touch does. */
+		if (down && focused) {
+			ok_node = focused;
+			bridge.push_event({Event::Pressed, focused});
+		} else if (!down && ok_node) {
+			bridge.push_event({Event::Released, ok_node});
+			bridge.push_event({Event::Activated, ok_node});
+			ok_node = 0;
+		} else if (!focused) {
+			bridge.push_event({Event::Key, 0, 0, 0, code, down});
+		}
+		return;
+	case KEY_BACK:
+	case KEY_ESC:
+		if (down) {
+			bridge.push_event({Event::Back, focused});
+		}
+		return;
+	}
+	bridge.push_event({Event::Key, focused, 0, 0, code, down});
+}
+
 /* ---- drawing: each node's scale is about its own centre ---- */
 
 void Core::State::draw(NodeId id, float alpha, float k, float tx, float ty) {
@@ -288,10 +420,13 @@ void Core::State::draw(NodeId id, float alpha, float k, float tx, float ty) {
 	if (alpha <= 0.002f) {
 		return;
 	}
-	float s = node->scale.value;
+	/* Focus lifts the node, and it leans the way the focus came from. */
+	float focus = node->focus.value, lit = std::clamp(focus, 0.0f, 1.0f);
+	float s = node->scale.value * (1 + (node->focus_scale - 1) * focus);
+	float lean = node->focus_tilt * lit;
 	float cx = node->x + node->width / 2, cy = node->y + node->height / 2;
-	tx += k * (cx * (1 - s) + node->tx.value);
-	ty += k * (cy * (1 - s) + node->ty.value);
+	tx += k * (cx * (1 - s) + node->tx.value + node->tilt_x.value * lean);
+	ty += k * (cy * (1 - s) + node->ty.value + node->tilt_y.value * lean);
 	k *= s;
 
 	float x = node->x * k + tx, y = node->y * k + ty;
@@ -303,12 +438,16 @@ void Core::State::draw(NodeId id, float alpha, float k, float tx, float ty) {
 	material.border_color = node->border_color.value;
 	material.bevel = node->bevel.value;
 	material.inner_shadow = node->inner_shadow.value * k;
-	material.shadow = node->shadow.value * k;
+	material.shadow = (node->shadow.value + node->focus_shadow * lit) * k;
 	material.shadow_color = node->shadow_color.value;
 	material.glow = node->glow.value * k;
 	material.inner_glow = node->inner_glow.value * k;
 	material.glow_color = node->glow_color.value;
 	material.surface = node->surface;
+	/* The sheen sits up and to the left and slides against the lean. */
+	material.highlight = node->focus_highlight * lit;
+	material.highlight_x = -0.3f - 0.5f * node->tilt_x.value;
+	material.highlight_y = -0.6f - 0.5f * node->tilt_y.value;
 	renderer.rect(x, y, node->width * k, node->height * k, node->radius * k, material, alpha);
 	if (node->kind == Kind::Label) {
 		Color color = node->text_color;
@@ -325,12 +464,27 @@ void Core::State::draw(NodeId id, float alpha, float k, float tx, float ty) {
 		color.a *= alpha;
 		renderer.lines(x, y, node->width * k, node->height * k, node->points, color);
 	}
+	/* A scroll container moves its content; a lifted child is drawn last,
+	 * over the neighbours it now overlaps. */
+	tx -= k * node->scroll_x.value;
+	ty -= k * node->scroll_y.value;
+	std::vector<Node *> raised;
 	for (NodeId child : node->children) {
-		draw(child, alpha, k, tx, ty);
+		Node *c = tree.get(child);
+		if (c && c->raised > 0.001f) {
+			raised.push_back(c);
+		} else {
+			draw(child, alpha, k, tx, ty);
+		}
+	}
+	std::stable_sort(raised.begin(), raised.end(),
+		[](const Node *a, const Node *b) { return a->raised < b->raised; });
+	for (Node *c : raised) {
+		draw(c->id, alpha, k, tx, ty);
 	}
 }
 
-void Core::State::frame() {
+bool Core::State::frame() {
 	if (resized) {
 		wl_surface_set_buffer_scale(surface, scale);
 		wl_egl_window_resize(egl_window, width * scale, height * scale, 0, 0);
@@ -338,6 +492,10 @@ void Core::State::frame() {
 	}
 	renderer.begin(width * scale, height * scale, scale);
 	tree.layout(width, height, renderer);
+	NodeId before = tree.focused();
+	tree.settle_focus(now_seconds());
+	bool refocused = focus_events(before);
+	tree.update_raised();
 	if (Node *root = tree.get(tree.root())) {
 		renderer.set_light(root->light.value * 0.0174533f);
 	}
@@ -371,6 +529,7 @@ void Core::State::frame() {
 		}
 		trace_last = now;
 	}
+	return refocused;
 }
 
 /* ---- the render thread ---- */
@@ -399,8 +558,9 @@ void Core::State::run() {
 				trace_frames ? length * 1000 / trace_frames : 0.0, trace_max_gap * 1000);
 		}
 		if ((dirty || animating) && configured) {
-			frame(); // blocks until the compositor wants the next frame
-			dirty = false;
+			// Blocks until the compositor wants the next frame. A focus that
+			// settled during layout starts its animation in the next one.
+			dirty = frame();
 		}
 		if (!running) break;
 
@@ -410,6 +570,10 @@ void Core::State::run() {
 		wl_display_flush(display);
 		pollfd fds[2] = {{wl_display_get_fd(display), POLLIN, 0}, {wake_fd, POLLIN, 0}};
 		int timeout = animating || dirty ? 0 : -1;
+		if (repeat_key) {
+			int wait = std::max(0, int((repeat_next - now_seconds()) * 1000));
+			timeout = timeout < 0 ? wait : std::min(timeout, wait);
+		}
 		if (poll(fds, 2, timeout) < 0 && errno != EINTR) {
 			wl_display_cancel_read(display);
 			break;
@@ -429,6 +593,13 @@ void Core::State::run() {
 			(void)ignored;
 		}
 		wl_display_dispatch_pending(display);
+		if (repeat_key && now_seconds() >= repeat_next) {
+			int rate = std::clamp(repeat_rate, 1, max_focus_repeat);
+			repeat_next = now_seconds() + 1.0 / rate; // a late frame delays, never bunches
+			if (!navigate(repeat_key, now_seconds())) {
+				repeat_key = 0; // at the edge: stop instead of repeating into the app
+			}
+		}
 	}
 }
 

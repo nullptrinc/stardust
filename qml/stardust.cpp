@@ -5,6 +5,7 @@
 #include <QMetaProperty>
 #include <cstdio>
 #include <algorithm>
+#include <linux/input-event-codes.h>
 #include "stardust.h"
 
 using stardust::Mutation;
@@ -50,7 +51,10 @@ bool convert(const char *name, const QVariant &value, Prop &prop, Value &out) {
 	struct Entry {
 		const char *name;
 		Prop prop;
-		enum { Float, Int, Bool, Color, Text, LayoutKind, Direction, Alignment, SurfaceKind } type;
+		enum {
+			Float, Int, Bool, Color, Text, LayoutKind, Direction, Alignment, SurfaceKind,
+			ScrollKind,
+		} type;
 	};
 	static const Entry entries[] = {
 		{"background", Prop::Background, Entry::Color},
@@ -90,6 +94,12 @@ bool convert(const char *name, const QVariant &value, Prop &prop, Value &out) {
 		{"textGlow", Prop::TextGlow, Entry::Float},
 		{"textGlowColor", Prop::TextGlowColor, Entry::Color},
 		{"lightAngle", Prop::LightAngle, Entry::Float},
+		{"focusable", Prop::Focusable, Entry::Bool},
+		{"focusScale", Prop::FocusScale, Entry::Float},
+		{"focusShadow", Prop::FocusShadow, Entry::Float},
+		{"focusHighlight", Prop::FocusHighlight, Entry::Float},
+		{"focusTilt", Prop::FocusTilt, Entry::Float},
+		{"scroll", Prop::Scroll, Entry::ScrollKind},
 	};
 	for (const Entry &entry : entries) {
 		if (qstrcmp(entry.name, name) != 0) {
@@ -110,10 +120,42 @@ bool convert(const char *name, const QVariant &value, Prop &prop, Value &out) {
 		case Entry::SurfaceKind:
 			out = parse_enum(value.toString(), {"plain", "brushed", "chrome"});
 			break;
+		case Entry::ScrollKind:
+			out = parse_enum(value.toString(), {"none", "horizontal", "vertical"});
+			break;
 		}
 		return true;
 	}
 	return false;
+}
+
+/* The name QML sees for a remote or keyboard key. */
+QString key_name(uint32_t code) {
+	static const struct { uint32_t code; const char *name; } names[] = {
+		{KEY_UP, "up"}, {KEY_DOWN, "down"}, {KEY_LEFT, "left"}, {KEY_RIGHT, "right"},
+		{KEY_OK, "ok"}, {KEY_SELECT, "ok"}, {KEY_ENTER, "ok"}, {KEY_KPENTER, "ok"},
+		{KEY_HOMEPAGE, "home"}, {KEY_MENU, "menu"}, {KEY_SETUP, "setup"},
+		{KEY_PLAYPAUSE, "playpause"}, {KEY_PLAY, "play"}, {KEY_PAUSE, "pause"},
+		{KEY_STOP, "stop"}, {KEY_STOPCD, "stop"}, {KEY_REWIND, "rewind"},
+		{KEY_FASTFORWARD, "fastforward"}, {KEY_NEXTSONG, "next"}, {KEY_PREVIOUSSONG, "previous"},
+		{KEY_VOLUMEUP, "volumeup"}, {KEY_VOLUMEDOWN, "volumedown"}, {KEY_MUTE, "mute"},
+		{KEY_SEARCH, "search"}, {KEY_INFO, "info"}, {KEY_EPG, "epg"}, {KEY_TV, "tv"},
+		{KEY_VOD, "vod"}, {KEY_CHANNELUP, "channelup"}, {KEY_CHANNELDOWN, "channeldown"},
+		{KEY_PROG1, "prog1"}, {KEY_PROG2, "prog2"}, {KEY_PROG3, "prog3"}, {KEY_PROG4, "prog4"},
+		{KEY_RED, "red"}, {KEY_GREEN, "green"}, {KEY_YELLOW, "yellow"}, {KEY_BLUE, "blue"},
+		{KEY_0, "0"}, {KEY_1, "1"}, {KEY_2, "2"}, {KEY_3, "3"}, {KEY_4, "4"},
+		{KEY_5, "5"}, {KEY_6, "6"}, {KEY_7, "7"}, {KEY_8, "8"}, {KEY_9, "9"},
+		{KEY_NUMERIC_0, "0"}, {KEY_NUMERIC_1, "1"}, {KEY_NUMERIC_2, "2"},
+		{KEY_NUMERIC_3, "3"}, {KEY_NUMERIC_4, "4"}, {KEY_NUMERIC_5, "5"},
+		{KEY_NUMERIC_6, "6"}, {KEY_NUMERIC_7, "7"}, {KEY_NUMERIC_8, "8"},
+		{KEY_NUMERIC_9, "9"},
+	};
+	for (const auto &entry : names) {
+		if (entry.code == code) {
+			return QString::fromLatin1(entry.name);
+		}
+	}
+	return QStringLiteral("key%1").arg(code);
 }
 
 } // namespace
@@ -175,6 +217,35 @@ void SdNode::propertyChanged() {
 
 bool SdNode::handlesClicked() const {
 	return isSignalConnected(QMetaMethod::fromSignal(&SdNode::clicked));
+}
+
+bool SdNode::handlesActivated() const {
+	return isSignalConnected(QMetaMethod::fromSignal(&SdNode::activated));
+}
+
+bool SdNode::handlesBack() const {
+	return isSignalConnected(QMetaMethod::fromSignal(&SdNode::back));
+}
+
+bool SdNode::handlesKeys() const {
+	return isSignalConnected(QMetaMethod::fromSignal(&SdNode::keyPressed)) ||
+		isSignalConnected(QMetaMethod::fromSignal(&SdNode::keyReleased));
+}
+
+void SdNode::setFocused(bool focused) {
+	if (focused_ != focused) {
+		focused_ = focused;
+		emit focusedChanged();
+	}
+}
+
+void SdNode::forceFocus() {
+	SdApp *app = SdApp::instance();
+	if (app->live() && id) {
+		app->post({Mutation::Set, id, 0, stardust::Kind::Container, Prop::Focus, 1});
+	} else {
+		wants_focus_ = true; // sent with the node's creation
+	}
 }
 
 void SdNode::setPressed(bool pressed) {
@@ -247,6 +318,9 @@ void SdApp::create(SdNode *node, stardust::NodeId parent) {
 		}
 	}
 	batch_.push_back({Mutation::Append, node->id, parent});
+	if (node->wantsFocus()) {
+		batch_.push_back({Mutation::Set, node->id, 0, stardust::Kind::Container, Prop::Focus, 1});
+	}
 	for (SdNode *child : node->children()) {
 		create(child, node->id);
 	}
@@ -256,6 +330,7 @@ bool SdApp::start(SdWindow *window) {
 	stardust::CoreOptions options;
 	options.title = window->title_.toStdString();
 	options.app_id = window->app_id_.toStdString();
+	window_ = window;
 	core_ = std::make_unique<stardust::Core>(bridge_, options);
 	bridge_.on_event = [this] {
 		QMetaObject::invokeMethod(this, &SdApp::drainEvents, Qt::QueuedConnection);
@@ -312,19 +387,65 @@ void SdApp::drainEvents() {
 			QCoreApplication::quit();
 			return;
 		}
+		using stardust::Event;
 		SdNode *node = nodes_.value(event.node);
-		/* pressed holds for the touched node and all its ancestors. */
-		for (SdNode *n = node; n && event.type != stardust::Event::Clicked; n = n->parentNode()) {
-			n->setPressed(event.type == stardust::Event::Pressed);
-		}
-		if (event.type == stardust::Event::Clicked) {
-			/* The nearest ancestor that handles onClicked gets it. */
+		switch (event.type) {
+		case Event::Pressed:
+		case Event::Released:
+			/* pressed holds for the touched node and all its ancestors. */
 			for (SdNode *n = node; n; n = n->parentNode()) {
-				if (n->handlesClicked()) {
-					emit n->clicked();
+				n->setPressed(event.type == Event::Pressed);
+			}
+			break;
+		case Event::Clicked:
+		case Event::Activated: {
+			/* The nearest ancestor that handles it gets it; a tap and OK
+			 * stand in for each other where only one is handled. */
+			bool click = event.type == Event::Clicked;
+			for (SdNode *n = node; n; n = n->parentNode()) {
+				bool primary = click ? n->handlesClicked() : n->handlesActivated();
+				bool other = click ? n->handlesActivated() : n->handlesClicked();
+				if (primary || other) {
+					if (click == primary) {
+						emit n->clicked();
+					} else {
+						emit n->activated();
+					}
 					break;
 				}
 			}
+			break;
+		}
+		case Event::Focused:
+		case Event::Unfocused:
+			if (node) {
+				node->setFocused(event.type == Event::Focused);
+			}
+			break;
+		case Event::Back: {
+			SdNode *n = node ? node : window_;
+			while (n && !n->handlesBack()) {
+				n = n->parentNode();
+			}
+			if (!n) {
+				QCoreApplication::quit(); /* nothing to go back to: the shell takes over */
+				return;
+			}
+			emit n->back();
+			break;
+		}
+		case Event::Key: {
+			const QString name = key_name(event.key);
+			for (SdNode *n = node ? node : window_; n; n = n->parentNode()) {
+				if (n->handlesKeys()) {
+					event.down ? emit n->keyPressed(name) : emit n->keyReleased(name);
+					break;
+				}
+			}
+			break;
+		}
+		case Event::Closed:
+			break;
 		}
 	}
 }

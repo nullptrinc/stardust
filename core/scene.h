@@ -46,7 +46,16 @@ enum class Prop : uint8_t {
 	Shadow, ShadowColor, Glow, InnerGlow, GlowColor, Material,
 	TextShadowColor, TextShadowOffset, TextGlow, TextGlowColor,
 	LightAngle, // degrees; on the root node, lights every chrome surface
+	// Focus, for remote controls and keyboards. A focusable node takes part in
+	// directional navigation; while focused it lifts by FocusScale, gains
+	// FocusShadow (logical px of blur) and a FocusHighlight sheen (0..1), and
+	// leans FocusTilt px towards the direction focus arrived from.
+	Focusable, FocusScale, FocusShadow, FocusHighlight, FocusTilt,
+	Focus, // any value: move the focus to this node
+	Scroll, // ScrollAxis: keeps the focused descendant inside the node
 };
+
+enum class ScrollAxis : uint8_t { None, Horizontal, Vertical };
 
 enum class Surface : uint8_t { Plain, Brushed, Chrome };
 
@@ -62,9 +71,17 @@ struct Mutation {
 };
 
 struct Event {
-	enum Type : uint8_t { Pressed, Released, Clicked, Closed } type;
+	enum Type : uint8_t {
+		Pressed, Released, Clicked, Closed,
+		Focused, Unfocused, // node gained or lost the focus
+		Activated, // OK on the focused node
+		Back, // Back or Escape; node is the focused node, or 0
+		Key, // any other key, or an arrow with nowhere to go: key and down
+	} type;
 	NodeId node = 0;
 	float x = 0, y = 0;
+	uint32_t key = 0; // Linux evdev code
+	bool down = false;
 };
 
 /* The only state shared between the application and render threads. */

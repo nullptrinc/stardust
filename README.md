@@ -49,6 +49,42 @@ animated like other properties:
 Labels add `textShadow`, `textShadowOffset`, `textGlow` (a real Gaussian
 blur) and `textGlowColor`.
 
+## Focus and remote controls
+
+Keys come through the ordinary Wayland keyboard. A `focusable` container
+takes part in directional navigation: the arrow keys move the focus to the
+nearest focusable container in that direction, preferring those in line,
+and holding an arrow repeats. The render core animates the move on its own
+thread: the focused container lifts by `focusScale` on a spring, gains
+`focusShadow` and a `focusHighlight` sheen, and leans `focusTilt` px the way
+the focus came from; a lifted container draws over its neighbours.
+
+```qml
+Container {
+    scroll: "horizontal"        // keeps the focused card in view
+    orientation: "horizontal"
+    padding: 40                 // room for the lift at the ends
+    spacing: 40
+    Container {
+        focusable: true
+        preferredWidth: 300; preferredHeight: 180; radius: 20
+        background: focused ? "#3a4a6a" : "#262b38"
+        onActivated: console.log("OK")
+    }
+}
+```
+
+| | |
+|---|---|
+| `focused` | follows the focus; `forceFocus()` moves it here |
+| `onActivated` | OK (or Enter) on the focused container; a tap and OK stand in for each other when only `onClicked` or `onActivated` is handled |
+| `onBack` | Back or Escape, on the focused container or its nearest ancestor that handles it; with no handler the app quits and the shell comes back |
+| `onKeyPressed(key)`, `onKeyReleased(key)` | any other key by name (`"playpause"`, `"volumeup"`, `"info"`, `"0"`…), and an arrow with nowhere to go |
+| `scroll` | `"horizontal"` or `"vertical"`: moves the content to show the focused descendant within the padding |
+
+The first focusable container takes the focus when there is none; when the
+focused one goes away or is hidden, the nearest one takes it.
+
 ## System state
 
 - `Theme` (in `Stardust 1.0`): the system accent and its shades (`accent`,

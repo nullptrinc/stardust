@@ -55,6 +55,8 @@ uniform float u_radius;
 uniform vec4 u_top, u_bottom, u_border_color, u_shadow_color, u_glow_color;
 uniform float u_border, u_gloss, u_bevel, u_inner_shadow, u_shadow, u_glow, u_inner_glow;
 uniform float u_surface, u_light, u_scale, u_alpha;
+uniform float u_highlight;
+uniform vec2 u_highlight_at;
 
 float box(vec2 p) {
 	vec2 q = abs(p) - u_half + u_radius;
@@ -111,6 +113,14 @@ void main() {
 	if (u_inner_glow > 0.0) {
 		float g = 1.0 - clamp(-d / (u_inner_glow * u_scale), 0.0, 1.0);
 		fill += u_glow_color * g * g * 0.8;
+	}
+	if (u_highlight > 0.0) {
+		/* The sheen of a lifted card: one soft, low spot. Distances are
+		 * normalized first and the ramp stays short and faint, so it holds
+		 * up at mediump and does not band in 8 bits. */
+		vec2 c = (p - u_highlight_at * u_half) / max(u_half.x, u_half.y);
+		float h = clamp(1.0 - dot(c, c), 0.0, 1.0);
+		fill.rgb += fill.a * u_highlight * 0.16 * h * h;
 	}
 	fill = clamp(fill, 0.0, 1.0);
 
@@ -215,7 +225,7 @@ bool Renderer::init(const char *regular_font, const char *bold_font) {
 		uniform("u_glow_color"), uniform("u_border"), uniform("u_gloss"), uniform("u_bevel"),
 		uniform("u_inner_shadow"), uniform("u_shadow"), uniform("u_glow"),
 		uniform("u_inner_glow"), uniform("u_surface"), uniform("u_light"), uniform("u_scale"),
-		uniform("u_alpha"),
+		uniform("u_alpha"), uniform("u_highlight"), uniform("u_highlight_at"),
 	};
 	text_program_ = link(text_vertex, text_fragment, "a_uv");
 	text_screen_ = glGetUniformLocation(text_program_, "u_screen");
@@ -309,6 +319,8 @@ void Renderer::rect(float x, float y, float w, float h, float radius, const Mate
 	glUniform1f(material_.light, light_);
 	glUniform1f(material_.scale, s);
 	glUniform1f(material_.alpha, alpha);
+	glUniform1f(material_.highlight, m.highlight);
+	glUniform2f(material_.highlight_at, m.highlight_x, m.highlight_y);
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, vertices);
 	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, vertices + 2);
 	glEnableVertexAttribArray(0);

@@ -1,14 +1,24 @@
 /* SPDX-License-Identifier: MIT */
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include "tree.h"
 
 namespace stardust {
 
 namespace {
 
+/* Focus moves run on their own clocks, whatever duration the app set. */
+constexpr float focus_ms = 500, tilt_ms = 650, scroll_ms = 420;
+
 float ease_out(double t) {
 	return 1 - std::pow(1 - t, 3);
+}
+
+/* An underdamped spring: starts at once, overshoots by about 7% near
+ * t = 0.3 and has come to rest by t = 1. */
+float spring(double t) {
+	return 1 - std::exp(-8 * t) * std::cos(8 * t);
 }
 
 float lerp(float a, float b, float t) {
@@ -38,7 +48,7 @@ bool advance(Animated<T> &property, double now, float duration_ms) {
 		return false;
 	}
 	double t = std::min(1.0, (now - property.start) * 1000 / duration_ms);
-	property.value = lerp(property.from, property.to, ease_out(t));
+	property.value = lerp(property.from, property.to, property.spring ? spring(t) : ease_out(t));
 	if (t >= 1) {
 		property.value = property.to;
 		property.running = false;
@@ -69,6 +79,19 @@ int as_int(const Value &value) {
 	return int(as_float(value));
 }
 
+/* Jumps to from and springs back to 0, as a lean that settles. */
+void kick(Node &node, Animated<float> &property, float from, double now) {
+	if (node.fresh || !node.animated || from == 0) {
+		property.value = property.from = property.to = 0;
+		property.running = false;
+		return;
+	}
+	property.value = property.from = from;
+	property.to = 0;
+	property.start = now;
+	property.running = true;
+}
+
 } // namespace
 
 Tree::Tree() = default;
@@ -86,6 +109,7 @@ void Tree::apply(const Mutation &mutation, double now) {
 		node.kind = mutation.kind;
 		node.opacity.value = node.opacity.to = 1;
 		node.scale.value = node.scale.to = 1;
+		node.focus.spring = node.tilt_x.spring = node.tilt_y.spring = true;
 		nodes_[node.id] = std::move(node);
 		return;
 	}
@@ -189,6 +213,17 @@ void Tree::apply(const Mutation &mutation, double now) {
 	case Prop::TextGlowColor:
 		if (auto *color = std::get_if<Color>(&value)) node->text_glow_color = *color;
 		break;
+	case Prop::Focusable: node->focusable = as_int(value) != 0; break;
+	case Prop::FocusScale: node->focus_scale = as_float(value); break;
+	case Prop::FocusShadow: node->focus_shadow = as_float(value); break;
+	case Prop::FocusHighlight: node->focus_highlight = as_float(value); break;
+	case Prop::FocusTilt: node->focus_tilt = as_float(value); break;
+	case Prop::Focus: requested_ = node->id; break;
+	case Prop::Scroll:
+		node->scroll = ScrollAxis(as_int(value));
+		if (node->scroll != ScrollAxis::Horizontal) set_animated(*node, node->scroll_x, 0.0f, now);
+		if (node->scroll != ScrollAxis::Vertical) set_animated(*node, node->scroll_y, 0.0f, now);
+		break;
 	}
 }
 
@@ -208,6 +243,11 @@ bool Tree::step(double now) {
 				&node.shadow, &node.glow, &node.inner_glow, &node.light}) {
 			running |= advance(*value, now, node.duration_ms);
 		}
+		running |= advance(node.focus, now, focus_ms);
+		running |= advance(node.tilt_x, now, tilt_ms);
+		running |= advance(node.tilt_y, now, tilt_ms);
+		running |= advance(node.scroll_x, now, scroll_ms);
+		running |= advance(node.scroll_y, now, scroll_ms);
 	}
 	return running;
 }
@@ -330,6 +370,8 @@ NodeId Tree::hit(NodeId id, float x, float y, float ox, float oy) const {
 			node.opacity.value <= 0.01f) {
 		return 0;
 	}
+	ox -= node.scroll_x.value;
+	oy -= node.scroll_y.value;
 	for (auto child = node.children.rbegin(); child != node.children.rend(); ++child) {
 		if (NodeId found_child = hit(*child, x, y, ox, oy)) {
 			return found_child;
@@ -340,6 +382,220 @@ NodeId Tree::hit(NodeId id, float x, float y, float ox, float oy) const {
 
 NodeId Tree::hit(float x, float y) const {
 	return hit(root_, x, y, 0, 0);
+}
+
+/* ---- focus: spatial navigation for remote controls ---- */
+
+bool Tree::target_rect(NodeId id, Rect &rect) const {
+	auto found = nodes_.find(id);
+	if (found == nodes_.end()) {
+		return false;
+	}
+	const Node &node = found->second;
+	rect = {node.x + node.tx.to, node.y + node.ty.to, node.width, node.height};
+	bool visible = node.opacity.to > 0.01f && node.width > 0 && node.height > 0;
+	NodeId top = id;
+	for (NodeId parent = node.parent; parent; ) {
+		auto ancestor = nodes_.find(parent);
+		if (ancestor == nodes_.end()) {
+			return false;
+		}
+		const Node &a = ancestor->second;
+		rect.x += a.tx.to - a.scroll_x.to;
+		rect.y += a.ty.to - a.scroll_y.to;
+		visible &= a.opacity.to > 0.01f;
+		top = parent;
+		parent = a.parent;
+	}
+	return visible && top == root_; // detached subtrees are never shown
+}
+
+void Tree::focus(NodeId id, float dx, float dy, double now) {
+	if (id == focused_) {
+		return;
+	}
+	if (Node *old = get(focused_)) {
+		set_animated(*old, old->focus, 0.0f, now);
+	}
+	focused_ = id;
+	Node *node = get(id);
+	if (!node) {
+		return;
+	}
+	set_animated(*node, node->focus, 1.0f, now);
+	kick(*node, node->tilt_x, dx, now);
+	kick(*node, node->tilt_y, dy, now);
+	reveal(id, now);
+	target_rect(id, focus_rect_);
+}
+
+void Tree::reveal(NodeId id, double now) {
+	const Node *node = get(id);
+	for (NodeId parent = node ? node->parent : 0; parent; ) {
+		Node *a = get(parent);
+		if (!a) {
+			return;
+		}
+		parent = a->parent;
+		if (a->scroll == ScrollAxis::None) {
+			continue;
+		}
+		Rect child, box;
+		target_rect(id, child);
+		target_rect(a->id, box);
+		bool horizontal = a->scroll == ScrollAxis::Horizontal;
+		Animated<float> &scroll = horizontal ? a->scroll_x : a->scroll_y;
+		/* In content coordinates; the padding leaves room for the lift. */
+		float start = (horizontal ? child.x - box.x : child.y - box.y) + scroll.to;
+		float size = horizontal ? child.width : child.height;
+		float view = horizontal ? box.width : box.height;
+		float target = scroll.to;
+		if (start + size - target > view - a->padding) {
+			target = start + size - (view - a->padding);
+		}
+		if (start - target < a->padding) {
+			target = start - a->padding;
+		}
+		float extent = 0;
+		for (NodeId c : a->children) {
+			if (const Node *n = get(c)) {
+				extent = std::max(extent, horizontal ? n->x + n->width - a->x : n->y + n->height - a->y);
+			}
+		}
+		extent += a->padding;
+		target = std::clamp(target, 0.0f, std::max(0.0f, extent - view));
+		if (target != scroll.to) {
+			set_animated(*a, scroll, target, now);
+		}
+	}
+}
+
+NodeId Tree::neighbour(Direction direction) const {
+	Rect from;
+	if (!target_rect(focused_, from)) {
+		return 0;
+	}
+	NodeId best = 0;
+	bool best_beam = false;
+	float best_score = 0;
+	for (const auto &[id, node] : nodes_) {
+		Rect r;
+		if (!node.focusable || id == focused_ || !target_rect(id, r)) {
+			continue;
+		}
+		/* major: the gap along the direction; offset: between the centres
+		 * across it; beam: overlapping across it, as a row or column does. */
+		float major, offset;
+		bool beam;
+		switch (direction) {
+		case Direction::Right:
+			if (r.center_x() <= from.center_x() + 0.5f || r.x < from.x + 0.5f) continue;
+			major = r.x - from.right();
+			break;
+		case Direction::Left:
+			if (r.center_x() >= from.center_x() - 0.5f || r.right() > from.right() - 0.5f) continue;
+			major = from.x - r.right();
+			break;
+		case Direction::Down:
+			if (r.center_y() <= from.center_y() + 0.5f || r.y < from.y + 0.5f) continue;
+			major = r.y - from.bottom();
+			break;
+		case Direction::Up:
+			if (r.center_y() >= from.center_y() - 0.5f || r.bottom() > from.bottom() - 0.5f) continue;
+			major = from.y - r.bottom();
+			break;
+		}
+		if (direction == Direction::Left || direction == Direction::Right) {
+			offset = std::fabs(r.center_y() - from.center_y());
+			beam = r.y < from.bottom() && r.bottom() > from.y;
+		} else {
+			offset = std::fabs(r.center_x() - from.center_x());
+			beam = r.x < from.right() && r.right() > from.x;
+		}
+		major = std::max(0.0f, major);
+		float score = 13 * major * major + offset * offset; // as Android's FocusFinder
+		bool better = !best || (beam && !best_beam) ||
+			(beam == best_beam && (score < best_score || (score == best_score && id < best)));
+		if (better) {
+			best = id;
+			best_beam = beam;
+			best_score = score;
+		}
+	}
+	return best;
+}
+
+NodeId Tree::first_focusable(NodeId id) const {
+	auto found = nodes_.find(id);
+	if (found == nodes_.end()) {
+		return 0;
+	}
+	Rect rect;
+	if (found->second.focusable && target_rect(id, rect)) {
+		return id;
+	}
+	for (NodeId child : found->second.children) {
+		if (NodeId first = first_focusable(child)) {
+			return first;
+		}
+	}
+	return 0;
+}
+
+NodeId Tree::nearest_focusable(float x, float y) const {
+	NodeId best = 0;
+	float best_distance = 0;
+	for (const auto &[id, node] : nodes_) {
+		Rect r;
+		if (!node.focusable || !target_rect(id, r)) {
+			continue;
+		}
+		float distance = std::hypot(r.center_x() - x, r.center_y() - y);
+		if (!best || distance < best_distance || (distance == best_distance && id < best)) {
+			best = id;
+			best_distance = distance;
+		}
+	}
+	return best;
+}
+
+void Tree::settle_focus(double now) {
+	if (NodeId requested = std::exchange(requested_, 0)) {
+		const Node *node = get(requested);
+		Rect rect;
+		if (node && node->focusable && target_rect(requested, rect)) {
+			focus(requested, 0, 0, now);
+		}
+	}
+	Rect rect;
+	const Node *node = get(focused_);
+	if (focused_ && (!node || !node->focusable || !target_rect(focused_, rect))) {
+		if (!node) {
+			focused_ = 0; // gone: nothing to let down
+		}
+		focus(nearest_focusable(focus_rect_.center_x(), focus_rect_.center_y()), 0, 0, now);
+	} else if (focused_) {
+		focus_rect_ = rect;
+	} else if (NodeId first = first_focusable(root_)) {
+		focus(first, 0, 0, now);
+	}
+}
+
+float Tree::update_raised(NodeId id) {
+	Node *node = get(id);
+	if (!node) {
+		return 0;
+	}
+	float raised = std::max(0.0f, node->focus.value);
+	for (NodeId child : node->children) {
+		raised = std::max(raised, update_raised(child));
+	}
+	node->raised = raised;
+	return raised;
+}
+
+void Tree::update_raised() {
+	update_raised(root_);
 }
 
 } // namespace stardust
