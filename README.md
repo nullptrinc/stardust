@@ -104,6 +104,22 @@ is a TV-style screen to try it: `STARRY_MODE=tv stardust tv.qml`.
   for any object of the [Constellation](https://github.com/nullptrinc/constellation)
   namespace (`values`, `exists`, `publish({...})`).
 
+- `SystemService` (in `Stardust 1.0`): requests to `lunar-settingsd`, the root
+  daemon behind Settings, for platform apps (signed with a platform key).
+  `send("bt power on")` returns a request number at once; the answer comes
+  later as `replied(request, ok, error, text)`: `error` is the daemon's code
+  (`denied`, `invalid`, `busy`, `unsupported`…) or `unavailable` and
+  `timeout` from here, `text` the rest of the answer, lines included. The
+  state to show is published under `/blinks/settings/` and read with `Blink`.
+
+  ```qml
+  property SystemService system: SystemService {
+      onReplied: (request, ok, error, text) => if (!ok) console.log(error, text)
+  }
+  property Blink bluetooth: Blink { path: "/blinks/settings/bluetooth" }
+  // bluetooth.values.powered, then: system.send("bt power off")
+  ```
+
 Apps are packaged as `.apf` with [cosmic](https://github.com/nullptrinc/cosmic);
 the system apps live in [sysapps](https://github.com/nullptrinc/sysapps).
 

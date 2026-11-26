@@ -57,9 +57,10 @@ if qt6_dep.found()
   # sysroot, so name it: the sysroot from the cross file plus Qt's includedir.
   qt_includedir = meson.get_external_property('sys_root', '') + dependency('Qt6Core',
     method: 'pkg-config').get_variable(pkgconfig: 'includedir')
-  qml_moc = qt6.compile_moc(headers: ['qml/stardust.h', 'qml/constellation-qml.h', 'qml/theme.h'],
+  qml_moc = qt6.compile_moc(headers: ['qml/stardust.h', 'qml/constellation-qml.h', 'qml/theme.h', 'qml/system-qml.h'],
     dependencies: qt6_dep, extra_args: ['-I' + qt_includedir])
-  executable('stardust', 'qml/main.cpp', 'qml/stardust.cpp', 'qml/constellation-qml.cpp', 'qml/theme.cpp', qml_moc,
+  executable('stardust', 'qml/main.cpp', 'qml/stardust.cpp', 'qml/constellation-qml.cpp', 'qml/theme.cpp',
+    'qml/system-qml.cpp', qml_moc,
     dependencies: [ui_core_dep, qt6_dep, constellation_dep],
     cpp_args: ui_cpp_args,
     install_rpath: rpath,
