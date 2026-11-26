@@ -90,6 +90,15 @@ focused one goes away or is hidden, the nearest one takes it.
 - `Theme` (in `Stardust 1.0`): the system accent and its shades (`accent`,
   `accentLit`, `accentGlow`, `accentShade`, `accentDeep`), shared by all apps
   through `/blinks/system/appearance`; `Theme.setAccent("#4fc3ff")`.
+  `STARRY_MODE=tv` selects the TV variant (`Theme.tv`, `Theme.formFactor`):
+  sizes for 1920x1080 at sofa distance (`safeMarginX/Y`, `cardWidth`,
+  `cardHeight`, `cardRadius`, `cardSpacing`, `fontTitle`…`fontCaption`), the
+  focus lift (`focusScale`, `focusShadow`, `focusHighlight`, `focusTilt`) and
+  solid colours (`background`, `surface`, `surfaceRaised`, `textPrimary`,
+  `textSecondary`, `shadowColor`). Mali-400/450 GPUs have no highp in
+  fragment shaders, so the TV look keeps to solid fills, soft shadows and a
+  faint sheen; long `backgroundEnd` gradients and the `brushed` and `chrome`
+  materials band or break there.
 - `import Constellation 1.0`: `Battery` for the battery, `Blink { path: ... }`
   for any object of the [Constellation](https://github.com/nullptrinc/constellation)
   namespace (`values`, `exists`, `publish({...})`).
