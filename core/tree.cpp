@@ -508,6 +508,9 @@ NodeId Tree::neighbour(Direction direction) const {
 		if (direction == Direction::Left || direction == Direction::Right) {
 			offset = std::fabs(r.center_y() - from.center_y());
 			beam = r.y < from.bottom() && r.bottom() > from.y;
+			if (!beam) {
+				continue; // sideways stays in its band: the end of a row is an edge
+			}
 		} else {
 			offset = std::fabs(r.center_x() - from.center_x());
 			beam = r.x < from.right() && r.right() > from.x;

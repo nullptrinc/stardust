@@ -96,7 +96,9 @@ public:
 	NodeId focused() const { return focused_; }
 	/* Moves the focus; (dx, dy) is the direction of travel, for the tilt. */
 	void focus(NodeId id, float dx, float dy, double now);
-	/* The nearest focusable node in a direction, or 0. */
+	/* The nearest focusable node in a direction, or 0. Left and right only
+	 * reach nodes that overlap the focused one vertically; up and down
+	 * prefer those that overlap horizontally. */
 	NodeId neighbour(Direction direction) const;
 	/* Puts the focus right after mutations and layout: on a node asked for
 	 * with Prop::Focus, off nodes that went away or out of sight (to the
