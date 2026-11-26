@@ -64,5 +64,5 @@ if qt6_dep.found()
     cpp_args: ui_cpp_args,
     install_rpath: rpath,
     install: true)
-  install_data('qml/demo.qml', install_dir: get_option('datadir') / 'stardust' / 'examples')
+  install_data('qml/demo.qml', 'qml/tv.qml', install_dir: get_option('datadir') / 'stardust' / 'examples')
 endif

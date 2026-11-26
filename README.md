@@ -83,7 +83,8 @@ Container {
 | `scroll` | `"horizontal"` or `"vertical"`: moves the content to show the focused descendant within the padding |
 
 The first focusable container takes the focus when there is none; when the
-focused one goes away or is hidden, the nearest one takes it.
+focused one goes away or is hidden, the nearest one takes it. `qml/tv.qml`
+is a TV-style screen to try it: `STARRY_MODE=tv stardust tv.qml`.
 
 ## System state
 
